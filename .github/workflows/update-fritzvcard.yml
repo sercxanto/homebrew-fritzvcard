@@ -1,0 +1,138 @@
+# Keeps Formula/fritzvcard.rb in step with the latest stable fritzvcard release.
+name: Update fritzvcard
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package, for example v1.2.3 (default latest release)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-fritzvcard
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: sercxanto/fritzvcard
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      update: ${{ steps.release.outputs.update }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tap
+          persist-credentials: false
+      - name: Choose the release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          tag=$REQUESTED_TAG
+          if [[ -z "$tag" ]]; then
+            tag=$(gh release view --repo "$SOURCE_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable release tag of the form vX.Y.Z, got '$tag'." >&2
+            exit 1
+          fi
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' tap/Formula/fritzvcard.rb 2>/dev/null || true)
+          update=true
+          if [[ -z "$REQUESTED_TAG" && "v$current" == "$tag" ]]; then
+            update=false
+            echo "Formula/fritzvcard.rb is already at $tag."
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "update=$update" >> "$GITHUB_OUTPUT"
+      - name: Download and verify the release
+        if: steps.release.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$SOURCE_REPOSITORY" --dir "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          sha256sum --check SHA256SUMS
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.release.outputs.update == 'true'
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ steps.release.outputs.tag }}
+          path: source
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Generate the formula
+        if: steps.release.outputs.update == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          python3 -B source/.github/scripts/package_metadata.py \
+            "$TAG" "$RUNNER_TEMP/release/SHA256SUMS" "$RUNNER_TEMP/packages"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.release.outputs.update == 'true'
+        with:
+          name: formula
+          path: ${{ runner.temp }}/packages/Formula/fritzvcard.rb
+          if-no-files-found: error
+
+  test:
+    needs: generate
+    if: needs.generate.outputs.update == 'true'
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Checks out this tap into the workspace and links it as sercxanto/tap.
+      - uses: Homebrew/actions/setup-homebrew@75064b260aea50a4b3dd1352975747d5576aaf05 # main
+        with:
+          stable: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: formula
+          path: Formula
+      - name: Install and test the formula
+        env:
+          TAG: ${{ needs.generate.outputs.tag }}
+        run: |
+          brew install --formula sercxanto/tap/fritzvcard
+          brew test sercxanto/tap/fritzvcard
+          actual=$(fritzvcard version)
+          echo "$actual"
+          test "$actual" = "fritzvcard $TAG"
+
+  publish:
+    needs: [generate, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: formula
+          path: Formula
+      - name: Commit and push the formula
+        env:
+          TAG: ${{ needs.generate.outputs.tag }}
+        run: |
+          if [[ -z "$(git status --porcelain -- Formula)" ]]; then
+            echo "Formula/fritzvcard.rb already matches $TAG."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/fritzvcard.rb
+          git commit -m "fritzvcard ${TAG#v}"
+          git push

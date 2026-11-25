@@ -26,9 +26,9 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git switch -c smoke-checkout
-          brew tap sercxanto/fritzvcard "$GITHUB_WORKSPACE"
+          brew tap sercxanto/tap "$GITHUB_WORKSPACE"
       - name: Install and test fritzvcard
         run: |
-          brew install sercxanto/fritzvcard/fritzvcard
-          brew test sercxanto/fritzvcard/fritzvcard
+          brew install sercxanto/tap/fritzvcard
+          brew test sercxanto/tap/fritzvcard
           fritzvcard version
